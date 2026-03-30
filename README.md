@@ -31,9 +31,9 @@ AutoDream follows the same broad pattern as Claude Code's `MEMORY.md`, but per m
 
 ## Settings
 
-AutoDream is off by default. Enable it in Settings and tune:
+AutoDream is on by default. Tune its settings:
 
-- `enabled`
 - `min_hours`
 - `min_sessions`
 - `line_limit`
+- `consolidate_every_n_dreams`
