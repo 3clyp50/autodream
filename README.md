@@ -2,7 +2,9 @@
 
 AutoDream is a plugin that depends on the builtin `_memory` plugin of Agent Zero.
 
-It performs a periodic reflective pass over recent sessions and recent memory fragments, consolidates what looks durable, writes scoped markdown memory files, regenerates a compact Claude Code-style `MEMORY.md` index, and syncs those durable files back into vector recall.
+Agent Zero's _memory plugin stores everything: every fragment, every session, but never forgets, never prioritises. Over time the vector database fills with duplicate fragments, stale context, and noise that dilutes semantic recall.
+
+AutoDream gives the agent a sleep cycle. It periodically reviews recent sessions, merges what overlaps, promotes what matters, and lets the rest fade, exactly the way memory consolidation works during REM sleep. The result is a leaner, higher-signal long-term memory that actually improves with use instead of degrading under its own weight.
 
 ## Dependency Model
 
