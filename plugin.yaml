@@ -1,6 +1,6 @@
 title: AutoDream
 description: Reflective durable-memory maintenance on top of the builtin _memory plugin. Make your agent dream and remember your projects and goals.
-version: 1.0.0
+version: 1.0.2
 settings_sections:
   - agent
 per_project_config: true
