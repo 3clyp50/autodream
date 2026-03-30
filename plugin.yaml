@@ -1,0 +1,7 @@
+title: AutoDream
+description: Periodically consolidates recent session learning into durable markdown memory backed by the _memory plugin.
+version: 1.0.0
+settings_sections:
+  - agent
+per_project_config: true
+per_agent_config: true

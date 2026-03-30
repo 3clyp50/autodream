@@ -1,0 +1,6 @@
+enabled: false
+# Hours since last dream (float; fractional values OK for testing). Use 0 for session-only gating.
+min_hours: 2
+min_sessions: 2
+line_limit: 120
+consolidate_every_n_dreams: 2

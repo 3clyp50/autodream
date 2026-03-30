@@ -1,0 +1,88 @@
+<html>
+<head>
+    <title>AutoDream</title>
+</head>
+
+<body>
+    <div x-data>
+        <template x-if="config">
+            <div>
+                <div class="section-title">AutoDream</div>
+                <div class="section-description">
+                    Reflective durable-memory maintenance built on top of the builtin <code>_memory</code> plugin.
+                    AutoDream writes scoped <code>MEMORY.md</code> indexes and durable markdown memories, then syncs
+                    those files back into vector recall.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enabled</div>
+                        <div class="field-description">
+                            Allow AutoDream to run after top-level chats when its time or session thresholds are met.
+                            Requires the builtin <code>_memory</code> plugin and auto-memorize to be enabled.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.enabled" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Minimum Hours</div>
+                        <div class="field-description">
+                            AutoDream may run once this many hours have passed since the last dream and new session
+                            activity exists. Use fractional values (for example 0.05) for quick testing. Set to 0 to rely
+                            only on the session threshold below.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number" x-model.number="config.min_hours" min="0" step="0.01" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Minimum Sessions</div>
+                        <div class="field-description">
+                            AutoDream may also run earlier once this many sessions have accumulated since the last dream.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number" x-model.number="config.min_sessions" min="1" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Index Line Limit</div>
+                        <div class="field-description">
+                            Maximum line count for the generated <code>MEMORY.md</code> index. The index remains a compact
+                            directory of durable memories rather than a dump of their content.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number" x-model.number="config.line_limit" min="20" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Consolidate Every N Dreams</div>
+                        <div class="field-description">
+                            Run a specialized "Clean & Consolidate" pass to explicitly merge overlapping files and prune redundant memories every N dreams. Set to 1 to run every time, or 0 to disable.
+                        </div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number" x-model.number="config.consolidate_every_n_dreams" min="0" />
+                    </div>
+                </div>
+            </div>
+        </template>
+    </div>
+</body>
+
+</html>
