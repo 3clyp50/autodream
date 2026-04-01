@@ -2,7 +2,7 @@ from agent import AgentContextType
 from helpers import persist_chat, plugins
 from helpers.extension import Extension
 
-from usr.plugins.AutoDream.helpers.auto_dream import schedule_auto_dream
+from usr.plugins.autodream.helpers.auto_dream import schedule_auto_dream
 from plugins._memory.helpers.memory import get_agent_memory_subdir
 
 
