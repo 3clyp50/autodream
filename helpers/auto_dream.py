@@ -19,7 +19,7 @@ from initialize import initialize_agent
 from langchain_core.documents import Document
 
 
-PLUGIN_NAME = "AutoDream"
+PLUGIN_NAME = "autodream"
 MEMORY_PLUGIN_NAME = "_memory"
 
 AUTO_DREAM_DIR = "autodream"
