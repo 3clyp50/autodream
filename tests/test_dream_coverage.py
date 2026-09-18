@@ -9,7 +9,6 @@ from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from helpers.history import History
@@ -79,18 +78,26 @@ async def check_coverage(session_count, vector_count, failure=None):
                 return message["message"]
             if system == "autodream.consolidate.sys.md":
                 consolidations.append(message)
+                if failure == "consolidation":
+                    return '{"changes": "invalid"}'
                 return '{"changes": []}'
             assert system == "autodream.sys.md"
             batches.append(message)
-            if failure == "batch" and len(batches) == 2:
-                return '[]'
+            if len(batches) == 2:
+                if failure == "batch":
+                    return '[]'
+                if failure == "invalid_changes":
+                    return '{"changes": "invalid"}'
             during_run = datetime.now(timezone.utc)
             sessions = json.loads(message["recent_sessions"])
             assert related.await_args.kwargs["queries"] == [s["first_prompt"] for s in sessions]
             if len(batches) > 1:
                 assert "Batch 1" in message["current_index"]
             return json.dumps({"changes": [{
-                "action": "upsert", "title": f"Batch {len(batches)}", "content": "Durable fact",
+                "action": "upsert", "path": f"batch-{len(batches)}.md",
+                "title": f"Batch {len(batches)}", "content": "Durable fact",
+                "source_context_ids": [s["context_id"] for s in sessions],
+                "source_memory_ids": [v["id"] for v in json.loads(message["recent_vector_memories"])],
             }]})
 
         context.return_value.agent0.read_prompt.side_effect = lambda name, **kw: kw if kw else name
@@ -143,6 +150,7 @@ async def main():
     for sessions, vectors, failure in [
         (0, 0, None), (1, 0, None), (8, 16, None), (9, 17, None),
         (17, 1, None), (1, 49, None), (9, 17, "batch"), (9, 17, "sync"),
+        (9, 17, "invalid_changes"), (9, 17, "consolidation"),
     ]:
         await check_coverage(sessions, vectors, failure)
         print(f"PASS sessions={sessions}, vectors={vectors}, failure={failure}")

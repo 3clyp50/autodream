@@ -21,12 +21,47 @@ consolidation runs once after the learning batches.
 
 The checkpoint advances to the run's start time only after every batch and vector
 sync succeed, so activity during a dream remains eligible for the next run. A
-failed run keeps its previous checkpoint and may replay already applied batches.
+failed run, including invalid learning or consolidation output, keeps its previous
+checkpoint and may replay already applied batches.
 Vector memories from the checkpoint's second are replayed because their timestamps
 have only second precision. Existing time/session trigger settings still apply.
 
 This prevents future coverage gaps; it cannot identify sessions already skipped
 by earlier versions.
+
+## Safe Memory Updates
+
+Learning and consolidation receive complete selected memory files and their
+metadata, up to 24 files within a 60,000-character JSON content budget. Files
+that do not fit are deferred, never truncated for replacement. The index may
+mention more files, but only supplied, unchanged files may be updated, merged,
+or deleted. New files must cite supplied session/vector IDs or source files.
+
+The host validates the entire plan before any mutation. Each target has one
+explicit normalized Markdown path. A deletion requires a replacement upsert in
+the same plan that names the original in `source_files`. Replacements are written
+before their sources are removed. Invalid plans fail the run instead of silently
+advancing the checkpoint.
+
+Updates preserve existing metadata; merges inherit source chat IDs, vector IDs,
+first-prompt references, and source-file lineage without count-based truncation.
+Inherited `inferred` memories stay inferred. Source IDs are checked against the
+supplied evidence; this provides traceability, not proof that a generated claim
+is true. A `.promptinclude.md` suffix classifies a rule; AutoDream does not itself
+load those files into system instructions or authorize inferred instructions.
+
+Before replacing or deleting a file, AutoDream saves its exact bytes under
+`autodream/archive/<original-name>/<sha256>.md`. Archives are outside active
+memory discovery, index generation, and AutoDream vector sync. They are retained
+until manually removed and are not an implementation of a request to forget data.
+
+Writes use Agent Zero's `helpers.file_transfers.write_stream_atomic`. Atomicity
+is per file, not per merge or per dream: an I/O failure can leave an applied
+subset, and there is no automatic rollback. Originals remain in the archive;
+copy the selected archived version back to `autodream/memories/<original-name>`
+to restore it. Remove an unwanted replacement separately if needed. A subsequent
+successful dream rebuilds the index and synchronizes active files to the vector
+store. Review active files before restoring a failed multi-file merge.
 
 ## Files Written
 
@@ -34,6 +69,7 @@ For each memory scope, AutoDream writes:
 
 - `autodream/MEMORY.md` as a compact index
 - `autodream/memories/*.md` as durable memory files
+- `autodream/archive/<original-name>/<sha256>.md` as recoverable originals, excluded from active retrieval
 - `autodream/.dream-log.md` as a short changelog of each dream run
 - `autodream/state.json` and `autodream/vector_state.json` as plugin bookkeeping
 
@@ -53,3 +89,18 @@ AutoDream is on by default. Tune its settings:
 - `min_sessions`
 - `line_limit`
 - `consolidate_every_n_dreams`
+
+## Verification
+
+From the Agent Zero framework root, use its Python environment:
+
+```bash
+PYTHONPATH=. python usr/plugins/autodream/tests/test_dream_coverage.py
+PYTHONPATH=. python usr/plugins/autodream/tests/test_dream_safety.py
+```
+
+These checks use isolated temporary files and mocked model/database calls. They
+cover batching, checkpoint failures, complete-file input, plan validation,
+provenance, archives, and interrupted writes; they do not measure answer quality.
+Implementation progress and remaining follow-ups are recorded in
+[WORK_LEDGER.md](WORK_LEDGER.md).

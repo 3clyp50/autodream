@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from agent import AgentContext, AgentContextType
 from helpers import files, plugins
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
 from helpers.dirty_json import DirtyJson
+from helpers.file_transfers import write_stream_atomic
 from helpers.print_style import PrintStyle
 from helpers import yaml as yaml_helper
 from initialize import initialize_agent
@@ -32,7 +34,7 @@ AUTO_DREAM_VECTOR_STATE_FILE = "vector_state.json"
 MAX_RECENT_SESSIONS = 8
 MAX_SESSION_CHARS = 4000
 MAX_EXISTING_MEMORY_FILES = 24
-MAX_EXISTING_MEMORY_CHARS = 2500
+MAX_EXISTING_MEMORY_INPUT_CHARS = 60000
 MAX_RECENT_VECTOR_MEMORIES = 16
 MAX_RECENT_VECTOR_MEMORY_CHARS = 700
 MAX_RELATED_VECTOR_MEMORIES = 12
@@ -58,6 +60,8 @@ class DreamMemoryFile:
     description: str
     updated_at: datetime | None
     content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    checksum: str = ""
 
 
 @dataclass
@@ -183,7 +187,7 @@ async def _run_auto_dream(
                 if q and q != "-":
                     queries.append(q)
 
-            existing_files = load_existing_memory_files(memory_subdir)
+            existing_files, existing_memories = prepare_memory_input(memory_subdir)
             current_index = truncate_for_prompt(
                 read_memory_index(memory_subdir),
                 MAX_INDEX_PROMPT_CHARS,
@@ -204,22 +208,7 @@ async def _run_auto_dream(
                 line_limit=int(config.get("line_limit", 120) or 120),
                 memory_scope=json.dumps(memory_scope, ensure_ascii=False, indent=2),
                 current_index=current_index or "_No existing index_",
-                existing_memories=json.dumps(
-                    [
-                        {
-                            "path": item.file_name,
-                            "title": item.title,
-                            "description": item.description,
-                            "updated_at": serialize_datetime(item.updated_at),
-                            "content": truncate_for_prompt(
-                                item.content, MAX_EXISTING_MEMORY_CHARS
-                            ),
-                        }
-                        for item in existing_files[:MAX_EXISTING_MEMORY_FILES]
-                    ],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                existing_memories=existing_memories,
                 recent_sessions=json.dumps(
                     [
                         {
@@ -265,6 +254,13 @@ async def _run_auto_dream(
             result = await apply_auto_dream_plan(
                 memory_subdir=memory_subdir,
                 plan=plan,
+                existing_files=existing_files,
+                source_context_ids={session.context_id for session in session_batch},
+                source_memory_ids={
+                    str(item.get("id", ""))
+                    for item in [*vector_batch, *related_vector_memories]
+                    if item.get("id")
+                },
                 line_limit=int(config.get("line_limit", 120) or 120),
                 run_metadata={
                     "memory_scope": memory_scope,
@@ -297,29 +293,14 @@ async def _run_auto_dream(
         consolidate_result = None
         if consolidate_every > 0 and dreams_since_consolidation >= consolidate_every:
             dreams_since_consolidation = 0
-            existing_files_for_consolidation = load_existing_memory_files(memory_subdir)
+            existing_files_for_consolidation, consolidation_input = prepare_memory_input(memory_subdir)
             
             if len(existing_files_for_consolidation) > 1:
                 try:
                     system_consolidate = agent.read_prompt("autodream.consolidate.sys.md")
                     message_consolidate = agent.read_prompt(
                         "autodream.consolidate.msg.md",
-                        existing_memories=json.dumps(
-                            [
-                                {
-                                    "path": item.file_name,
-                                    "title": item.title,
-                                    "description": item.description,
-                                    "updated_at": serialize_datetime(item.updated_at),
-                                    "content": truncate_for_prompt(
-                                        item.content, MAX_EXISTING_MEMORY_CHARS
-                                    ),
-                                }
-                                for item in existing_files_for_consolidation[:MAX_EXISTING_MEMORY_FILES]
-                            ],
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
+                        existing_memories=consolidation_input,
                         memory_scope=json.dumps(memory_scope, ensure_ascii=False, indent=2)
                     )
 
@@ -329,18 +310,18 @@ async def _run_auto_dream(
                         background=True,
                     )
                     plan_consolidate = DirtyJson.parse_string((response_consolidate or "").strip())
-                    if isinstance(plan_consolidate, dict):
-                        consolidate_result = await apply_auto_dream_plan(
-                            memory_subdir=memory_subdir,
-                            plan=plan_consolidate,
-                            line_limit=int(config.get("line_limit", 120) or 120),
-                            run_metadata={
-                                "memory_scope": memory_scope,
-                                "phase": "consolidation"
-                            },
-                        )
+                    consolidate_result = await apply_auto_dream_plan(
+                        memory_subdir=memory_subdir,
+                        plan=plan_consolidate,
+                        existing_files=existing_files_for_consolidation,
+                        line_limit=int(config.get("line_limit", 120) or 120),
+                        run_metadata={
+                            "memory_scope": memory_scope,
+                            "phase": "consolidation"
+                        },
+                    )
                 except Exception as e:
-                    PrintStyle.error(f"AutoDream consolidation failed for '{memory_subdir}': {e}")
+                    raise ValueError(f"AutoDream consolidation failed: {e}") from e
 
         vector_sync = await sync_autodream_vector_memory(memory_subdir)
         
@@ -397,105 +378,166 @@ async def apply_auto_dream_plan(
     memory_subdir: str,
     plan: dict[str, Any],
     line_limit: int,
+    existing_files: list[DreamMemoryFile],
     run_metadata: dict[str, Any] | None = None,
+    source_context_ids: set[str] | None = None,
+    source_memory_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    memories_dir = Path(get_autodream_memories_dir(memory_subdir))
-    memories_dir.mkdir(parents=True, exist_ok=True)
+    if not isinstance(plan, dict) or not isinstance(plan.get("changes"), list):
+        raise ValueError("AutoDream plan must contain a changes array.")
+    if plan.keys() - {"summary", "changes"}:
+        raise ValueError("Unknown AutoDream plan fields.")
+    if not isinstance(plan.get("summary", ""), str):
+        raise ValueError("AutoDream summary must be a string.")
 
-    summary = str(plan.get("summary", "") or "").strip()
-    raw_changes = plan.get("changes", [])
-    if not isinstance(raw_changes, list):
-        raw_changes = []
+    memories_dir = Path(get_autodream_memories_dir(memory_subdir))
+    supplied = {item.file_name: item for item in existing_files}
+    source_keys = ("source_context_ids", "source_memory_ids", "source_first_prompts")
+    allowed_ids = {
+        "source_context_ids": set(source_context_ids or ()),
+        "source_memory_ids": set(source_memory_ids or ()),
+    }
+    for key, values in allowed_ids.items():
+        for item in existing_files:
+            values.update(normalize_string_list(item.metadata.get(key, [])))
+
+    changes: dict[str, dict[str, Any]] = {}
+    originals: dict[str, bytes] = {}
+    for change in plan["changes"]:
+        if not isinstance(change, dict) or change.get("action") not in ("upsert", "delete"):
+            raise ValueError("AutoDream changes must be upsert or delete objects.")
+        allowed_fields = {"action", "path", "reason", "replacement"} if change["action"] == "delete" else {
+            "action", "path", "title", "description", "content", "grounding", "source_files", *source_keys,
+        }
+        if change.keys() - allowed_fields:
+            raise ValueError("Unknown AutoDream change fields.")
+        name = change.get("path")
+        if not isinstance(name, str) or not name or normalize_memory_filename(name) != name:
+            raise ValueError("AutoDream paths must be normalized Markdown file names.")
+        if name in changes:
+            raise ValueError(f"Duplicate AutoDream target: {name}")
+        path = memories_dir / name
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError(f"AutoDream target is not a regular file: {name}")
+        if path.exists() and name not in supplied:
+            raise ValueError(f"AutoDream was not shown the complete file: {name}")
+
+        if change["action"] == "upsert":
+            for key in ("title", "content"):
+                if not isinstance(change.get(key), str) or not change[key].strip():
+                    raise ValueError(f"AutoDream upsert requires nonempty {key}: {name}")
+            if not isinstance(change.get("description", ""), str):
+                raise ValueError(f"AutoDream description must be a string: {name}")
+            if change.get("grounding", "inferred") not in ("grounded", "inferred"):
+                raise ValueError(f"Invalid AutoDream grounding: {name}")
+            for key in (*source_keys, "source_files"):
+                values = change.get(key, [])
+                if not isinstance(values, list) or any(
+                    not isinstance(value, str) or not value.strip() for value in values
+                ):
+                    raise ValueError(f"AutoDream {key} must contain nonempty strings: {name}")
+                if key in allowed_ids and not set(values) <= allowed_ids[key]:
+                    raise ValueError(f"Unknown AutoDream {key}: {name}")
+            sources = set(change.get("source_files", []))
+            if name in supplied:
+                sources.add(name)
+            if not sources <= supplied.keys():
+                raise ValueError(f"AutoDream merge references an unseen source: {name}")
+            if not sources and not any(change.get(key) for key in allowed_ids):
+                raise ValueError(f"AutoDream upsert requires source evidence: {name}")
+        else:
+            if name not in supplied:
+                raise ValueError(f"AutoDream cannot delete an unseen file: {name}")
+            if not isinstance(change.get("reason"), str) or not change["reason"].strip():
+                raise ValueError(f"AutoDream deletion requires a reason: {name}")
+            if not isinstance(change.get("replacement"), str):
+                raise ValueError(f"AutoDream deletion requires a replacement: {name}")
+            sources = {name}
+
+        for source in sources:
+            source_path = memories_dir / source
+            if source_path.is_symlink():
+                raise ValueError(f"AutoDream source is a symlink: {source}")
+            original = source_path.read_bytes()
+            if hashlib.sha256(original).hexdigest() != supplied[source].checksum:
+                raise ValueError(f"AutoDream source changed after it was read: {source}")
+            originals[source] = original
+        changes[name] = change
+
+    for name, change in changes.items():
+        if change["action"] == "delete":
+            replacement = changes.get(change["replacement"], {})
+            if replacement.get("action") != "upsert" or name not in replacement.get("source_files", []):
+                raise ValueError(f"AutoDream deletion must reference a planned merge: {name}")
+
+    # Render the entire validated plan before creating backups or changing files.
+    current_scope = (run_metadata or {}).get("memory_scope", {})
+    rendered_changes: dict[str, str] = {}
+    for name, change in changes.items():
+        if change["action"] != "upsert":
+            continue
+        previous = supplied.get(name)
+        sources = [supplied[source] for source in dict.fromkeys(
+            ([name] if previous else []) + change.get("source_files", [])
+        )]
+        frontmatter = dict(previous.metadata) if previous else {}
+        frontmatter.update({
+            "title": change["title"].strip(),
+            "description": collapse_single_line(change.get("description", frontmatter.get("description", ""))),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "memory_scope": memory_subdir,
+            "grounding": change.get("grounding", frontmatter.get("grounding", "inferred")),
+        })
+        if any(item.metadata.get("grounding") == "inferred" for item in sources):
+            frontmatter["grounding"] = "inferred"
+        for key in source_keys:
+            values = [value for item in sources for value in normalize_string_list(item.metadata.get(key, []))]
+            values.extend(change.get(key, []))
+            if key == "source_first_prompts":
+                values = [normalize_source_prompt_snippet(value) for value in values]
+            if values:
+                frontmatter[key] = normalize_string_list(values)
+        source_files = [
+            source for item in sources
+            for source in normalize_string_list(item.metadata.get("source_files", []))
+        ]
+        source_files.extend(item.file_name for item in sources if item.file_name != name)
+        if source_files:
+            frontmatter["source_files"] = normalize_string_list(source_files)
+        for key in ("canonical_scope_name", "project_title"):
+            value = current_scope.get("canonical_name" if key == "canonical_scope_name" else key)
+            if value:
+                frontmatter[key] = collapse_single_line(value)
+        rendered_changes[name] = (
+            "---\n" + yaml_helper.dumps(frontmatter).strip() + "\n---\n\n"
+            + format_memory_body(frontmatter["title"], change["content"])
+        )
+
+    # Back up every original before the first mutation. Archives are not active memories.
+    for name in changes.keys() & originals.keys():
+        original = originals[name]
+        archive = Path(get_autodream_root(memory_subdir)) / "archive" / name / (
+            hashlib.sha256(original).hexdigest() + ".md"
+        )
+        write_stream_atomic(io.BytesIO(original), archive)
 
     created_files: list[str] = []
     updated_files: list[str] = []
     deleted_files: list[str] = []
-    existing_file_names = {
-        item.file_name for item in load_existing_memory_files(memory_subdir)
-    }
-    current_scope = (
-        run_metadata.get("memory_scope", {}) if isinstance(run_metadata, dict) else {}
-    )
+    for name, rendered in rendered_changes.items():
+        write_stream_atomic(io.BytesIO(rendered.encode("utf-8")), memories_dir / name)
+        (updated_files if name in originals else created_files).append(name)
+    # Publish replacements before removing their sources, regardless of model order.
+    for name, change in changes.items():
+        if change["action"] == "delete":
+            (memories_dir / name).unlink()
+            deleted_files.append(name)
 
-    for change in raw_changes:
-        if not isinstance(change, dict):
-            continue
-
-        action = str(change.get("action", "") or "").strip().lower()
-        title = str(change.get("title", "") or "").strip()
-        description = collapse_single_line(change.get("description", ""))
-        raw_path = str(change.get("path", "") or "").strip()
-        file_name = (
-            normalize_memory_filename(raw_path or title or "memory")
-            if action == "delete"
-            else select_memory_file_name(raw_path, title, existing_file_names)
-        )
-        file_path = memories_dir / file_name
-
-        if action == "delete":
-            if file_path.exists():
-                file_path.unlink()
-                deleted_files.append(file_name)
-                existing_file_names.discard(file_name)
-            continue
-
-        if action != "upsert":
-            continue
-        if not title:
-            continue
-
-        frontmatter = {
-            "title": title,
-            "description": description,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "memory_scope": memory_subdir,
-        }
-        grounding = str(change.get("grounding", "") or "").strip().lower()
-        if grounding in {"grounded", "inferred"}:
-            frontmatter["grounding"] = grounding
-        source_context_ids = normalize_string_list(change.get("source_context_ids", []))
-        if source_context_ids:
-            frontmatter["source_context_ids"] = source_context_ids
-        source_first_prompts = normalize_string_list(
-            change.get("source_first_prompts", [])
-        )
-        source_first_prompts = [
-            normalize_source_prompt_snippet(p) for p in source_first_prompts
-        ]
-        source_first_prompts = [p for p in source_first_prompts if p]
-        if source_first_prompts:
-            frontmatter["source_first_prompts"] = source_first_prompts[:8]
-        source_memory_ids = normalize_string_list(change.get("source_memory_ids", []))
-        if source_memory_ids:
-            frontmatter["source_memory_ids"] = source_memory_ids[:12]
-        canonical_name = collapse_single_line(current_scope.get("canonical_name", ""))
-        if canonical_name:
-            frontmatter["canonical_scope_name"] = canonical_name
-        project_title = collapse_single_line(current_scope.get("project_title", ""))
-        if project_title:
-            frontmatter["project_title"] = project_title
-
-        body = format_memory_body(title, str(change.get("content", "") or ""))
-        rendered = (
-            "---\n"
-            + yaml_helper.dumps(frontmatter).strip()
-            + "\n---\n\n"
-            + body
-            + ("\n" if not body.endswith("\n") else "")
-        )
-
-        previous = file_path.read_text(encoding="utf-8") if file_path.exists() else None
-        file_path.write_text(rendered, encoding="utf-8")
-        if previous is None:
-            created_files.append(file_name)
-        elif previous != rendered:
-            updated_files.append(file_name)
-        existing_file_names.add(file_name)
-
+    summary = plan.get("summary", "").strip()
     memory_files = load_existing_memory_files(memory_subdir)
     memory_index = render_memory_index(memory_files, line_limit=line_limit)
-    Path(get_autodream_index_path(memory_subdir)).write_text(
-        memory_index, encoding="utf-8"
+    write_stream_atomic(
+        io.BytesIO(memory_index.encode("utf-8")), get_autodream_index_path(memory_subdir)
     )
 
     changed = bool(created_files or updated_files or deleted_files)
@@ -813,7 +855,10 @@ def load_existing_memory_files(memory_subdir: str) -> list[DreamMemoryFile]:
     files_out: list[DreamMemoryFile] = []
     for path in memories_dir.glob("*.md"):
         try:
-            meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            if path.is_symlink():
+                continue
+            original = path.read_bytes()
+            meta, body = parse_frontmatter(original.decode("utf-8"))
             title = str(meta.get("title", "") or path.stem).strip() or path.stem
             description = collapse_single_line(meta.get("description", ""))
             updated_at = parse_iso_datetime(meta.get("updated_at"))
@@ -824,6 +869,8 @@ def load_existing_memory_files(memory_subdir: str) -> list[DreamMemoryFile]:
                     description=description,
                     updated_at=updated_at,
                     content=body.strip(),
+                    metadata=meta,
+                    checksum=hashlib.sha256(original).hexdigest(),
                 )
             )
         except Exception:
@@ -837,6 +884,30 @@ def load_existing_memory_files(memory_subdir: str) -> list[DreamMemoryFile]:
         reverse=True,
     )
     return files_out
+
+
+def prepare_memory_input(memory_subdir: str) -> tuple[list[DreamMemoryFile], str]:
+    selected: list[DreamMemoryFile] = []
+    entries: list[str] = []
+    remaining = MAX_EXISTING_MEMORY_INPUT_CHARS - 2
+    for item in load_existing_memory_files(memory_subdir):
+        entry = json.dumps({
+            "path": item.file_name,
+            "title": item.title,
+            "description": item.description,
+            "updated_at": serialize_datetime(item.updated_at),
+            "metadata": item.metadata,
+            "content": item.content,
+        }, ensure_ascii=False, default=str)
+        cost = len(entry) + (2 if entries else 0)
+        if cost > remaining:
+            continue
+        selected.append(item)
+        entries.append(entry)
+        remaining -= cost
+        if len(selected) >= MAX_EXISTING_MEMORY_FILES:
+            break
+    return selected, "[" + ",\n".join(entries) + "]"
 
 
 def describe_memory_scope(memory_subdir: str) -> dict[str, Any]:
@@ -1289,62 +1360,6 @@ def normalize_memory_filename(value: str) -> str:
     if not safe.endswith(".md"):
         safe += ".md"
     return safe
-
-
-def select_memory_file_name(
-    raw_path: str,
-    title: str,
-    existing_file_names: set[str],
-) -> str:
-    normalized_path = normalize_memory_filename(raw_path) if raw_path else ""
-    title_file_name = normalize_memory_filename(title or normalized_path or "memory")
-
-    if normalized_path and normalized_path in existing_file_names:
-        return ensure_unique_memory_filename(
-            normalized_path,
-            existing_file_names,
-            allow_existing=True,
-        )
-
-    if not normalized_path and title_file_name in existing_file_names:
-        return ensure_unique_memory_filename(
-            title_file_name,
-            existing_file_names,
-            allow_existing=True,
-        )
-
-    return ensure_unique_memory_filename(
-        title_file_name,
-        existing_file_names,
-        allow_existing=False,
-    )
-
-
-def ensure_unique_memory_filename(
-    file_name: str,
-    existing_file_names: set[str],
-    allow_existing: bool,
-) -> str:
-    if allow_existing and file_name in existing_file_names:
-        return file_name
-    if file_name not in existing_file_names:
-        return file_name
-
-    stem = file_name
-    suffix = ""
-    if file_name.endswith(".promptinclude.md"):
-        stem = file_name[:-17]
-        suffix = ".promptinclude.md"
-    elif file_name.endswith(".md"):
-        stem = file_name[:-3]
-        suffix = ".md"
-
-    counter = 2
-    while True:
-        candidate = f"{stem}-{counter}{suffix}"
-        if candidate not in existing_file_names:
-            return candidate
-        counter += 1
 
 
 def truncate_single_line(value: Any, max_chars: int) -> str:
