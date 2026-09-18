@@ -16,7 +16,7 @@ class AutoDream(Extension):
         if self.agent.context.type == AgentContextType.BACKGROUND:
             return
 
-        config = plugins.get_plugin_config("AutoDream", self.agent) or {}
+        config = plugins.get_plugin_config("autodream", self.agent) or {}
         memory_config = plugins.get_plugin_config("_memory", self.agent) or {}
         if not memory_config.get("memory_memorize_enabled", True):
             return
