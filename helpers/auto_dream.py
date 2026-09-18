@@ -109,6 +109,7 @@ async def _run_auto_dream(
         if not config.get("enabled"):
             return
 
+        run_started_at = datetime.now(timezone.utc)
         state = load_auto_dream_state(memory_subdir)
         last_dream_at = parse_iso_datetime(state.get("last_dream_at"))
         recent_sessions = load_recent_sessions(memory_subdir, last_dream_at)
@@ -139,127 +140,154 @@ async def _run_auto_dream(
 
         agent = background_context.agent0
 
-        # Summarize long transcripts safely using the standard utility prompts
-        system_sum = agent.read_prompt("fw.topic_summary.sys.md")
-        for session in recent_sessions:
-            if len(session.transcript) > MAX_SESSION_CHARS:
-                msg_sum = agent.read_prompt("fw.topic_summary.msg.md", content=session.transcript)
-                summary = await agent.call_utility_model(system=system_sum, message=msg_sum)
-                if summary:
-                    session.transcript = summary.strip()
-
-        # Generate targeted semantic queries for related vector memories
-        queries: list[str] = []
-        system_query = agent.read_prompt("memory.memories_query.sys.md")
-        for session in recent_sessions[-MAX_VECTOR_QUERY_COUNT:]:
-            msg_query = agent.read_prompt(
-                "memory.memories_query.msg.md",
-                history=session.transcript,
-                message=session.first_prompt
-            )
-            q = await agent.call_utility_model(system=system_query, message=msg_query)
-            q = (q or "").strip()
-            if q and q != "-":
-                queries.append(q)
-
-        existing_files = load_existing_memory_files(memory_subdir)
-        memory_scope = describe_memory_scope(memory_subdir)
-        orphan_candidates = find_orphan_candidates(memory_subdir)
-        current_index = truncate_for_prompt(
-            read_memory_index(memory_subdir),
-            MAX_INDEX_PROMPT_CHARS,
-        )
         recent_vector_memories = await load_recent_vector_memories(
             memory_subdir=memory_subdir,
             last_dream_at=last_dream_at,
         )
-        related_vector_memories = await load_related_vector_memories(
-            memory_subdir=memory_subdir,
-            queries=queries,
-            existing_memory_ids={
-                str(item.get("id", "")).strip()
-                for item in recent_vector_memories
-                if str(item.get("id", "")).strip()
+        memory_scope = describe_memory_scope(memory_subdir)
+        orphan_candidates = find_orphan_candidates(memory_subdir)
+        results = []
+        related_vector_count = 0
+        batch_count = max(
+            (len(recent_sessions) + MAX_RECENT_SESSIONS - 1) // MAX_RECENT_SESSIONS,
+            (len(recent_vector_memories) + MAX_RECENT_VECTOR_MEMORIES - 1)
+            // MAX_RECENT_VECTOR_MEMORIES,
+        )
+        for batch in range(batch_count):
+            session_batch = recent_sessions[
+                batch * MAX_RECENT_SESSIONS : (batch + 1) * MAX_RECENT_SESSIONS
+            ]
+            vector_batch = recent_vector_memories[
+                batch * MAX_RECENT_VECTOR_MEMORIES : (batch + 1) * MAX_RECENT_VECTOR_MEMORIES
+            ]
+            # Summarize long transcripts safely using the standard utility prompts
+            system_sum = agent.read_prompt("fw.topic_summary.sys.md")
+            for session in session_batch:
+                if len(session.transcript) > MAX_SESSION_CHARS:
+                    msg_sum = agent.read_prompt("fw.topic_summary.msg.md", content=session.transcript)
+                    summary = await agent.call_utility_model(system=system_sum, message=msg_sum)
+                    if summary:
+                        session.transcript = summary.strip()
+
+            # Generate targeted semantic queries for related vector memories
+            queries: list[str] = []
+            system_query = agent.read_prompt("memory.memories_query.sys.md")
+            for session in session_batch[:MAX_VECTOR_QUERY_COUNT]:
+                msg_query = agent.read_prompt(
+                    "memory.memories_query.msg.md",
+                    history=session.transcript,
+                    message=session.first_prompt
+                )
+                q = await agent.call_utility_model(system=system_query, message=msg_query)
+                q = (q or "").strip()
+                if q and q != "-":
+                    queries.append(q)
+
+            existing_files = load_existing_memory_files(memory_subdir)
+            current_index = truncate_for_prompt(
+                read_memory_index(memory_subdir),
+                MAX_INDEX_PROMPT_CHARS,
+            )
+            related_vector_memories = await load_related_vector_memories(
+                memory_subdir=memory_subdir,
+                queries=queries,
+                existing_memory_ids={
+                    str(item.get("id", "")).strip()
+                    for item in vector_batch
+                    if str(item.get("id", "")).strip()
+                },
+            )
+
+            system = agent.read_prompt("autodream.sys.md")
+            message = agent.read_prompt(
+                "autodream.msg.md",
+                line_limit=int(config.get("line_limit", 120) or 120),
+                memory_scope=json.dumps(memory_scope, ensure_ascii=False, indent=2),
+                current_index=current_index or "_No existing index_",
+                existing_memories=json.dumps(
+                    [
+                        {
+                            "path": item.file_name,
+                            "title": item.title,
+                            "description": item.description,
+                            "updated_at": serialize_datetime(item.updated_at),
+                            "content": truncate_for_prompt(
+                                item.content, MAX_EXISTING_MEMORY_CHARS
+                            ),
+                        }
+                        for item in existing_files[:MAX_EXISTING_MEMORY_FILES]
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                recent_sessions=json.dumps(
+                    [
+                        {
+                            "context_id": session.context_id,
+                            "project_name": session.project_name,
+                            "agent_profile": session.agent_profile,
+                            "created_at": serialize_datetime(session.created_at),
+                            "last_message_at": serialize_datetime(session.last_message_at),
+                            "first_prompt": session.first_prompt,
+                            "transcript": session.transcript,
+                        }
+                        for session in session_batch
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                recent_vector_memories=json.dumps(
+                    vector_batch,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                related_vector_memories=json.dumps(
+                    related_vector_memories,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                orphan_candidates=json.dumps(
+                    orphan_candidates,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+            response = await agent.call_utility_model(
+                system=system,
+                message=message,
+                background=True,
+            )
+            plan = DirtyJson.parse_string((response or "").strip())
+            if not isinstance(plan, dict):
+                raise ValueError("AutoDream model response was not a JSON object.")
+
+            result = await apply_auto_dream_plan(
+                memory_subdir=memory_subdir,
+                plan=plan,
+                line_limit=int(config.get("line_limit", 120) or 120),
+                run_metadata={
+                    "memory_scope": memory_scope,
+                    "orphan_candidates": orphan_candidates,
+                    "recent_session_count": len(session_batch),
+                    "recent_vector_count": len(vector_batch),
+                    "related_vector_count": len(related_vector_memories),
+                    "phase": "learn"
+                },
+            )
+
+            results.append(result)
+            related_vector_count += len(related_vector_memories)
+
+        result = {
+            "summary": " | ".join(item["summary"] for item in results),
+            "changed": any(item["changed"] for item in results),
+            "memory_file_count": results[-1]["memory_file_count"],
+            **{
+                key: [name for item in results for name in item[key]]
+                for key in ("created_files", "updated_files", "deleted_files")
             },
-        )
-
-        system = agent.read_prompt("autodream.sys.md")
-        message = agent.read_prompt(
-            "autodream.msg.md",
-            line_limit=int(config.get("line_limit", 120) or 120),
-            memory_scope=json.dumps(memory_scope, ensure_ascii=False, indent=2),
-            current_index=current_index or "_No existing index_",
-            existing_memories=json.dumps(
-                [
-                    {
-                        "path": item.file_name,
-                        "title": item.title,
-                        "description": item.description,
-                        "updated_at": serialize_datetime(item.updated_at),
-                        "content": truncate_for_prompt(
-                            item.content, MAX_EXISTING_MEMORY_CHARS
-                        ),
-                    }
-                    for item in existing_files[:MAX_EXISTING_MEMORY_FILES]
-                ],
-                ensure_ascii=False,
-                indent=2,
-            ),
-            recent_sessions=json.dumps(
-                [
-                    {
-                        "context_id": session.context_id,
-                        "project_name": session.project_name,
-                        "agent_profile": session.agent_profile,
-                        "created_at": serialize_datetime(session.created_at),
-                        "last_message_at": serialize_datetime(session.last_message_at),
-                        "first_prompt": session.first_prompt,
-                        "transcript": session.transcript,
-                    }
-                    for session in recent_sessions[:MAX_RECENT_SESSIONS]
-                ],
-                ensure_ascii=False,
-                indent=2,
-            ),
-            recent_vector_memories=json.dumps(
-                recent_vector_memories,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            related_vector_memories=json.dumps(
-                related_vector_memories,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            orphan_candidates=json.dumps(
-                orphan_candidates,
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
-
-        response = await agent.call_utility_model(
-            system=system,
-            message=message,
-            background=True,
-        )
-        plan = DirtyJson.parse_string((response or "").strip())
-        if not isinstance(plan, dict):
-            raise ValueError("AutoDream model response was not a JSON object.")
-
-        result = await apply_auto_dream_plan(
-            memory_subdir=memory_subdir,
-            plan=plan,
-            line_limit=int(config.get("line_limit", 120) or 120),
-            run_metadata={
-                "memory_scope": memory_scope,
-                "orphan_candidates": orphan_candidates,
-                "recent_session_count": len(recent_sessions),
-                "recent_vector_count": len(recent_vector_memories),
-                "related_vector_count": len(related_vector_memories),
-                "phase": "learn"
-            },
-        )
+        }
 
         # Phase 2: Consolidate / Clean
         # Run periodically to prune redundancies and explicitly merge overlapping memories
@@ -326,12 +354,12 @@ async def _run_auto_dream(
             memory_subdir,
             {
                 "schema_version": 2,
-                "last_dream_at": datetime.now(timezone.utc).isoformat(),
+                "last_dream_at": run_started_at.isoformat(),
                 "last_status": "updated" if changed else "noop",
                 "last_summary": final_summary,
                 "last_session_count": len(recent_sessions),
                 "last_recent_vector_count": len(recent_vector_memories),
-                "last_related_vector_count": len(related_vector_memories),
+                "last_related_vector_count": related_vector_count,
                 "memory_file_count": consolidate_result["memory_file_count"] if consolidate_result else result["memory_file_count"],
                 "last_created_files": result["created_files"] + (consolidate_result["created_files"] if consolidate_result else []),
                 "last_updated_files": result["updated_files"] + (consolidate_result["updated_files"] if consolidate_result else []),
@@ -585,7 +613,8 @@ async def load_recent_vector_memories(
             continue
 
         timestamp = parse_memory_timestamp(metadata.get("timestamp", ""))
-        if last_dream_at and timestamp and timestamp <= last_dream_at:
+        # Vector timestamps have second precision; replay the boundary second.
+        if last_dream_at and timestamp and timestamp < last_dream_at.replace(microsecond=0):
             continue
 
         recent.append(
@@ -601,7 +630,7 @@ async def load_recent_vector_memories(
         )
 
     recent.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
-    return recent[:MAX_RECENT_VECTOR_MEMORIES]
+    return recent
 
 
 async def load_related_vector_memories(

@@ -10,7 +10,23 @@ AutoDream gives the agent a sleep cycle. It periodically reviews recent sessions
 
 - `_memory` remains the source of vector storage, similarity search, and memory-subdirectory resolution.
 - `AutoDream` owns the reflective pass, prompt contract, durable markdown files, `MEMORY.md` generation, and dream changelog.
-- AutoDream keeps its code and settings under `usr/plugins/AutoDream/`, but stores durable memory inside each `_memory` scope so project-isolated memory continues to work as expected.
+- AutoDream keeps its code and settings under `usr/plugins/autodream/`, but stores durable memory inside each `_memory` scope so project-isolated memory continues to work as expected.
+
+## Dream Coverage
+
+Each dream reviews all pending sessions and recent vector memories in batches of
+up to 8 sessions and 16 vector memories. Semantic searches use the sessions in
+that same batch. Durable files and the index are refreshed between batches;
+consolidation runs once after the learning batches.
+
+The checkpoint advances to the run's start time only after every batch and vector
+sync succeed, so activity during a dream remains eligible for the next run. A
+failed run keeps its previous checkpoint and may replay already applied batches.
+Vector memories from the checkpoint's second are replayed because their timestamps
+have only second precision. Existing time/session trigger settings still apply.
+
+This prevents future coverage gaps; it cannot identify sessions already skipped
+by earlier versions.
 
 ## Files Written
 
