@@ -1,6 +1,7 @@
 <html>
 <head>
     <title>AutoDream</title>
+    <script type="module" src="/plugins/autodream/webui/stats-store.js"></script>
 </head>
 
 <body>
@@ -13,6 +14,58 @@
                     AutoDream writes scoped <code>MEMORY.md</code> indexes and durable markdown memories, then syncs
                     those files back into vector recall.
                 </div>
+
+                <template x-if="$store.autodreamStats">
+                    <section class="autodream-journal" aria-label="Dream statistics"
+                        x-data="{ dreamStats: $instantiate($store.autodreamStats) }"
+                        x-init="dreamStats.load(context.projectName, context.agentProfileKey);
+                            $watch('context.projectName', () => dreamStats.load(context.projectName, context.agentProfileKey));
+                            $watch('context.agentProfileKey', () => dreamStats.load(context.projectName, context.agentProfileKey))"
+                        x-destroy="dreamStats.cleanup()" :aria-busy="dreamStats.loading">
+                        <header class="autodream-night">
+                            <svg class="autodream-sky" viewBox="0 0 360 150" fill="none" aria-hidden="true" focusable="false">
+                                <path d="M246 26a38 38 0 1 0 45 54 32 32 0 0 1-45-54Z" fill="currentColor" opacity=".85"/>
+                                <g fill="currentColor">
+                                    <circle cx="39" cy="40" r="1.3" opacity=".35"/><circle cx="80" cy="93" r="1.5" opacity=".6"/>
+                                    <circle cx="114" cy="28" r="1" opacity=".5"/><circle cx="155" cy="61" r="2" opacity=".65"/>
+                                    <circle cx="171" cy="114" r="1" opacity=".4"/><circle cx="212" cy="17" r="1.2" opacity=".5"/>
+                                    <circle cx="306" cy="31" r="1.4" opacity=".4"/><circle cx="337" cy="100" r="1" opacity=".6"/>
+                                    <circle cx="286" cy="130" r="1.2" opacity=".3"/>
+                                </g>
+                                <path d="m73 42 0 10m-5-5h10m124 44v10m-5-5h10m125-39v14m-7-7h14" stroke="currentColor" stroke-linecap="round" opacity=".7"/>
+                                <path d="m80 93 75-32 45 35 53 23" stroke="currentColor" stroke-width=".7" stroke-dasharray="2 5" opacity=".18"/>
+                                <path d="M13 145c87-20 175-8 277-16" stroke="currentColor" opacity=".08"/>
+                            </svg>
+                            <div class="autodream-night-copy">
+                                <span class="autodream-eyebrow">AFTER THE CONVERSATION</span>
+                                <h3>Dream journal</h3>
+                                <span class="autodream-status" role="status" x-text="dreamStats.status"></span>
+                            </div>
+                            <button type="button" class="button autodream-refresh" title="Refresh dream statistics"
+                                aria-label="Refresh dream statistics" :disabled="dreamStats.loading"
+                                @click="dreamStats.load(context.projectName, context.agentProfileKey)">
+                                <x-icon name="refresh"></x-icon>
+                            </button>
+                        </header>
+                        <div class="autodream-metrics">
+                            <div><span>Dreams completed</span><strong x-text="dreamStats.number(dreamStats.stats.completed_dreams)"></strong></div>
+                            <div><span>Estimated tokens</span><strong x-text="dreamStats.number((dreamStats.stats.input_tokens || 0) + (dreamStats.stats.output_tokens || 0))"></strong></div>
+                            <div><span>Model calls</span><strong x-text="dreamStats.number(dreamStats.stats.model_calls)"></strong></div>
+                            <div><span>Last duration</span><strong x-text="dreamStats.duration(dreamStats.last.duration_seconds)"></strong></div>
+                        </div>
+                        <div class="autodream-details">
+                            <div class="autodream-detail"><span>Last dream</span><span x-text="dreamStats.data ? dreamStats.date(dreamStats.last.finished_at || dreamStats.data.last_dream_at) : '—'"></span></div>
+                            <div class="autodream-detail"><span>Memory scope</span><code x-text="dreamStats.data?.memory_scope || '—'"></code></div>
+                            <div class="autodream-detail"><span>Input / output tokens</span><span x-text="`${dreamStats.number(dreamStats.stats.input_tokens)} / ${dreamStats.number(dreamStats.stats.output_tokens)}`"></span></div>
+                            <div class="autodream-detail"><span>Memory files / failed dreams</span><span x-text="`${dreamStats.data?.memory_file_count ?? '—'} / ${dreamStats.number(dreamStats.stats.failed_dreams)}`"></span></div>
+                            <p class="autodream-note" x-show="dreamStats.data">
+                                <span x-text="dreamStats.stats.tracking_since ? `Tracking since ${dreamStats.date(dreamStats.stats.tracking_since)}.` : 'Totals start with your next dream; earlier runs are not counted.'"></span>
+                                Token and call totals include failed attempts. Tokens estimate prompt and response text, excluding embeddings, hidden reasoning and provider retries.
+                                Profiles sharing a memory scope share these statistics.
+                            </p>
+                        </div>
+                    </section>
+                </template>
 
                 <div class="field">
                     <div class="field-label">
@@ -83,6 +136,34 @@
             </div>
         </template>
     </div>
+    <style>
+        .autodream-journal { margin: 1.25rem 0 1.75rem; border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; background: var(--color-background); }
+        .autodream-night { position: relative; isolation: isolate; padding: 1.4rem 1.4rem 1.2rem; background: var(--color-panel); min-height: 166px; }
+        .autodream-sky { position: absolute; right: 1rem; top: 0; height: 100%; width: 52%; color: var(--color-text); z-index: -1; }
+        .autodream-night-copy { max-width: 65%; }
+        .autodream-eyebrow { font-size: .62rem; font-weight: 500; letter-spacing: .14em; color: var(--color-text-muted); }
+        .autodream-night h3 { margin: .55rem 0 1rem; font-size: 1.45rem; font-weight: 500; letter-spacing: -.035em; color: var(--color-text); }
+        .autodream-status { display: inline-block; padding: .25rem .55rem; border: 1px solid var(--color-border); border-radius: 20px; font-size: .7rem; background: var(--color-background); }
+        .autodream-refresh { position: absolute; top: .75rem; right: .75rem; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; background: var(--color-panel); }
+        .autodream-refresh:focus-visible { outline: 2px solid var(--color-text); outline-offset: 3px; }
+        .autodream-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+        .autodream-metrics > div { padding: 1rem 1.1rem; min-width: 0; }
+        .autodream-metrics > div + div { border-left: 1px solid var(--color-border); }
+        .autodream-metrics span { display: block; color: var(--color-text-muted); font-size: .72rem; margin-bottom: .5rem; }
+        .autodream-metrics strong { font-size: 1.45rem; font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+        .autodream-details { padding: .85rem 1.1rem; }
+        .autodream-detail { display: flex; justify-content: space-between; gap: 1rem; margin: .4rem 0; font-size: .75rem; }
+        .autodream-detail > :first-child { color: var(--color-text-muted); }
+        .autodream-detail > :last-child { text-align: right; overflow-wrap: anywhere; min-width: 0; }
+        .autodream-note { color: var(--color-text-muted); font-size: .68rem; line-height: 1.6; margin: .9rem 0 .1rem; }
+        @media (max-width: 600px) {
+            .autodream-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .autodream-metrics > div:nth-child(3) { border-left: 0; }
+            .autodream-metrics > div:nth-child(n+3) { border-top: 1px solid var(--color-border); }
+            .autodream-night-copy { max-width: 75%; }
+            .autodream-sky { right: 0; width: 55%; opacity: .5; }
+        }
+    </style>
 </body>
 
 </html>

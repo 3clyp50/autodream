@@ -72,6 +72,7 @@ For each memory scope, AutoDream writes:
 - `autodream/archive/<original-name>/<sha256>.md` as recoverable originals, excluded from active retrieval
 - `autodream/.dream-log.md` as a short changelog of each dream run
 - `autodream/state.json` and `autodream/vector_state.json` as plugin bookkeeping
+- `autodream/stats.json` as cumulative dream statistics
 
 ## Claude Code `MEMORY.md` Compatibility
 
@@ -80,6 +81,29 @@ AutoDream follows the same broad pattern as Claude Code's `MEMORY.md`, but per m
 - `MEMORY.md` is an index, not the memory itself.
 - The real durable content lives in the sibling markdown files under `autodream/memories/`.
 - Those durable files are synced into the `_memory` vector database so symbolic browsing and semantic recall stay aligned.
+
+## Dream Statistics
+
+Open AutoDream's **Config** panel to see the Dream journal: completed dreams,
+estimated input/output tokens, utility-model calls, last duration, latest result,
+and the last successful memory-file count. Use **Refresh** to update the panel.
+Project and agent-profile selectors use the same `_memory` scope as the dream
+runner; profiles sharing a memory folder share statistics.
+
+Totals begin with the first run after this update. Older last-dream information
+remains visible, but historical totals are not reconstructed. Failed attempts are
+counted separately, and their known text estimates and calls contribute to totals.
+Token figures use Agent Zero's text-token estimator, not provider billing usage;
+embeddings, hidden reasoning, provider retries and provider-specific message
+formatting are excluded. Summary, query, learning and consolidation calls are
+included.
+
+Statistics are stored atomically in `autodream/stats.json`, separate from the
+processing checkpoint and memory files. A statistics-file write failure is logged
+without changing the outcome of a dream. The authenticated, CSRF-protected
+`/api/plugins/autodream/stats` endpoint reads this data without starting a dream
+or opening a vector database. The static night-sky graphic uses the active Agent
+Zero theme and adds no animation, external assets or charting dependency.
 
 ## Settings
 
@@ -97,6 +121,7 @@ From the Agent Zero framework root, use its Python environment:
 ```bash
 PYTHONPATH=. python usr/plugins/autodream/tests/test_dream_coverage.py
 PYTHONPATH=. python usr/plugins/autodream/tests/test_dream_safety.py
+PYTHONPATH=. python usr/plugins/autodream/tests/test_dream_stats.py
 ```
 
 These checks use isolated temporary files and mocked model/database calls. They

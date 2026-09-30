@@ -5,13 +5,14 @@ import io
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from agent import AgentContext, AgentContextType
-from helpers import files, plugins
+from helpers import files, plugins, tokens
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
 from helpers.dirty_json import DirtyJson
 from helpers.file_transfers import write_stream_atomic
@@ -105,6 +106,8 @@ async def _run_auto_dream(
     memory_subdir: str,
 ) -> None:
     background_context: AgentContext | None = None
+    run_stats: dict[str, Any] | None = None
+    started = time.monotonic()
     try:
         config = get_autodream_config(project_name, agent_profile)
         memory_config = get_memory_plugin_config(project_name, agent_profile)
@@ -126,6 +129,15 @@ async def _run_auto_dream(
         ):
             return
 
+        started = time.monotonic()
+        run_stats = {
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "failed",
+            "model_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "sessions": len(recent_sessions),
+        }
         background_context = AgentContext(
             config=initialize_agent(
                 {"agent_profile": agent_profile} if agent_profile else None
@@ -143,6 +155,13 @@ async def _run_auto_dream(
             )
 
         agent = background_context.agent0
+
+        async def call_dream_model(system: str, message: str, **kwargs):
+            run_stats["model_calls"] += 1
+            run_stats["input_tokens"] += tokens.approximate_tokens(system) + tokens.approximate_tokens(message)
+            response = await agent.call_utility_model(system=system, message=message, **kwargs)
+            run_stats["output_tokens"] += tokens.approximate_tokens(response or "")
+            return response
 
         recent_vector_memories = await load_recent_vector_memories(
             memory_subdir=memory_subdir,
@@ -169,7 +188,7 @@ async def _run_auto_dream(
             for session in session_batch:
                 if len(session.transcript) > MAX_SESSION_CHARS:
                     msg_sum = agent.read_prompt("fw.topic_summary.msg.md", content=session.transcript)
-                    summary = await agent.call_utility_model(system=system_sum, message=msg_sum)
+                    summary = await call_dream_model(system=system_sum, message=msg_sum)
                     if summary:
                         session.transcript = summary.strip()
 
@@ -182,7 +201,7 @@ async def _run_auto_dream(
                     history=session.transcript,
                     message=session.first_prompt
                 )
-                q = await agent.call_utility_model(system=system_query, message=msg_query)
+                q = await call_dream_model(system=system_query, message=msg_query)
                 q = (q or "").strip()
                 if q and q != "-":
                     queries.append(q)
@@ -242,7 +261,7 @@ async def _run_auto_dream(
                 ),
             )
 
-            response = await agent.call_utility_model(
+            response = await call_dream_model(
                 system=system,
                 message=message,
                 background=True,
@@ -304,7 +323,7 @@ async def _run_auto_dream(
                         memory_scope=json.dumps(memory_scope, ensure_ascii=False, indent=2)
                     )
 
-                    response_consolidate = await agent.call_utility_model(
+                    response_consolidate = await call_dream_model(
                         system=system_consolidate,
                         message=message_consolidate,
                         background=True,
@@ -355,6 +374,8 @@ async def _run_auto_dream(
             },
         )
 
+        run_stats["status"] = "updated" if changed else "noop"
+
         if changed and final_summary:
             context = AgentContext.get(context_id)
             if context:
@@ -367,11 +388,39 @@ async def _run_auto_dream(
     except Exception as exc:
         PrintStyle.error(f"AutoDream failed for '{memory_subdir}': {exc}")
     finally:
+        if run_stats is not None:
+            run_stats["finished_at"] = datetime.now(timezone.utc).isoformat()
+            run_stats["duration_seconds"] = round(time.monotonic() - started, 2)
+            try:
+                record_dream_stats(memory_subdir, run_stats)
+            except Exception as exc:
+                PrintStyle.error(f"AutoDream could not save statistics for '{memory_subdir}': {exc}")
         with _RUNNING_LOCK:
             _RUNNING_SUBDIRS.discard(memory_subdir)
         _TASKS.pop(memory_subdir, None)
         if background_context:
             AgentContext.remove(background_context.id)
+
+
+def load_dream_stats(memory_subdir: str) -> dict[str, Any]:
+    path = Path(get_autodream_root(memory_subdir)) / "stats.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def record_dream_stats(memory_subdir: str, run: dict[str, Any]) -> None:
+    stats = load_dream_stats(memory_subdir)
+    stats.setdefault("tracking_since", run["started_at"])
+    counter = "failed_dreams" if run["status"] == "failed" else "completed_dreams"
+    stats[counter] = stats.get(counter, 0) + 1
+    for key in ("model_calls", "input_tokens", "output_tokens", "duration_seconds"):
+        stats[key] = stats.get(key, 0) + run[key]
+    stats["last_run"] = run
+    write_stream_atomic(
+        io.BytesIO(json.dumps(stats, ensure_ascii=False, indent=2).encode("utf-8")),
+        Path(get_autodream_root(memory_subdir)) / "stats.json",
+    )
 
 
 async def apply_auto_dream_plan(

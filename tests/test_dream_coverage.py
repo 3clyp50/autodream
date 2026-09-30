@@ -23,7 +23,7 @@ sys.modules[spec.name] = dream
 spec.loader.exec_module(dream)
 
 
-async def check_coverage(session_count, vector_count, failure=None):
+async def check_coverage(session_count, vector_count, failure=None, stats_write_error=False):
     with TemporaryDirectory() as directory, ExitStack() as stack:
         root = Path(directory)
         now = datetime.now(timezone.utc)
@@ -36,6 +36,9 @@ async def check_coverage(session_count, vector_count, failure=None):
         }))
         stack.enter_context(patch.object(dream, "get_memory_plugin_config", return_value={}))
         stack.enter_context(patch.object(dream, "initialize_agent"))
+        stack.enter_context(patch.object(dream.tokens, "approximate_tokens", side_effect=lambda text: len(str(text))))
+        if stats_write_error:
+            stack.enter_context(patch.object(dream, "record_dream_stats", side_effect=OSError("stats unavailable")))
         errors = stack.enter_context(patch.object(dream.PrintStyle, "error"))
         context = stack.enter_context(patch.object(dream, "AgentContext"))
         dream.save_auto_dream_state("default", {"last_dream_at": previous.isoformat()})
@@ -105,6 +108,16 @@ async def check_coverage(session_count, vector_count, failure=None):
         dream._RUNNING_SUBDIRS.add("default")
         dream._TASKS["default"] = Mock()
         await dream._run_auto_dream("source", None, "", "default")
+        stats = dream.load_dream_stats("default")
+        if session_count and not stats_write_error:
+            assert stats.get("failed_dreams", 0) == int(bool(failure))
+            assert stats.get("completed_dreams", 0) == int(not failure)
+            assert stats["model_calls"] == context.return_value.agent0.call_utility_model.call_count
+            assert stats["input_tokens"] > 0 and stats["output_tokens"] > 0
+            assert stats["last_run"]["sessions"] == session_count
+            assert stats["last_run"]["duration_seconds"] >= 0
+        else:
+            assert stats == {}
         state = dream.load_auto_dream_state("default")
         if failure:
             assert state["last_dream_at"] == previous.isoformat()
@@ -112,7 +125,7 @@ async def check_coverage(session_count, vector_count, failure=None):
             if failure == "batch":
                 sync.assert_not_awaited()
         elif session_count:
-            assert not errors.called, errors.call_args
+            assert errors.call_count == int(stats_write_error), errors.call_args
             seen_sessions = [s["context_id"] for b in batches for s in json.loads(b["recent_sessions"])]
             seen_vectors = [v["id"] for b in batches for v in json.loads(b["recent_vector_memories"])]
             assert sorted(seen_sessions) == sorted(map(str, range(session_count)))
@@ -154,6 +167,9 @@ async def main():
     ]:
         await check_coverage(sessions, vectors, failure)
         print(f"PASS sessions={sessions}, vectors={vectors}, failure={failure}")
+
+    await check_coverage(1, 0, stats_write_error=True)
+    print("PASS statistics write failure does not change dream completion")
 
 
 if __name__ == "__main__":

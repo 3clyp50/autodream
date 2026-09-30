@@ -62,3 +62,33 @@ improvement in answer quality.
 - Version bumped from `1.0.5` to `1.0.6` for the safety patch. Commit and push
   to `main` authorized by the user. The quality evaluation and other follow-ups
   listed above have not been implemented or measured.
+
+## Dream statistics — 30 September 2026
+
+| Item | Status | Decision |
+| --- | --- | --- |
+| Scope | Complete | Add statistics to the existing config panel, using its project/profile selectors. No separate dashboard. |
+| Accounting | Complete | Count completed/failed dreams and utility calls; persist input/output token estimates and duration per memory scope in `stats.json`. No historical totals are invented. |
+| UI | Complete | A0 theme variables and Rubik typography, static SVG night sky, responsive metric cards, manual refresh. |
+| Verification | Complete | Check successful/failed/skipped runs, scope selection, old state, and desktop/mobile rendering. |
+
+Utility calls return text without provider billing usage. Token totals will be
+explicit estimates of submitted prompts and returned text, excluding embeddings,
+hidden reasoning, provider retries, and provider-specific formatting. Statistics-file write
+errors must not alter dream checkpoint or memory behavior.
+
+- UI revision: removed the moon ellipse and decorative tagline at the user’s request.
+
+- Verification passed: eleven run/accounting scenarios (including statistics-write
+  failure), the existing eight safety groups, cumulative counters, API scope
+  isolation/sharing, authentication/CSRF defaults, invalid scope rejection, and
+  corrupt-statistics preservation. Model/database calls were mocked for tests.
+- Browser checks passed in the actual settings modal: legacy/empty totals,
+  populated demo values, refresh, project/profile changes, dark and light themes,
+  and a 390px mobile viewport with no horizontal overflow. The revised markup
+  was checked for absence of the ellipse and tagline.
+- The temporary disabled plugin copy used for UI checks was removed. It was never
+  enabled; no production dream or memory write was triggered. Preview figures
+  came from browser-only response fixtures, not persisted statistics.
+- Version bumped to `1.0.7`; commit and push to `main` authorized by the user.
+  No new dependencies or benchmark infrastructure.
